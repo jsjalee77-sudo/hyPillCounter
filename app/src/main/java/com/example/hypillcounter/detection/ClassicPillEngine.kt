@@ -75,7 +75,7 @@ object ClassicPillEngine {
         val t = (max(minT, median * 2.5f + 8f) * (1.25f - 0.5f * s)).roundToInt().coerceIn(8, 220)
 
         var mask = BooleanArray(n) { dist[it] >= t }
-        fillSmallHoles(mask, w, h, maxHole = max(16, (n * 0.002).toInt()))
+        fillSmallHoles(mask, w, h, maxHole = max(16, (n * 0.02).toInt())) // 반사광·투명 캡슐 내부
         val iters = max(1, (max(w, h) / 400f).roundToInt())
         mask = dilate(erode(mask, w, h, iters), w, h, iters)
 
@@ -143,7 +143,14 @@ object ClassicPillEngine {
             for (c in grp) {
                 if (c.area < globalUnit * 0.12) continue // 파편/그림자 조각/노이즈
                 val ratio = c.area / unit
-                val k = if (c.solidity < SOLID_SINGLE && ratio >= 1.5) max(2, ratio.roundToInt()).coerceAtMost(60) else 1
+                // 잘록한 목으로 나뉘는 중심부 개수 = 붙어 있는 알약 수.
+                // 그림자·반사로 모양이 약간 오목한 것만으로는 나누지 않는다.
+                val cores = if (c.solidity < SOLID_SINGLE) countCores(c, labels, w) else 1
+                val k = when {
+                    cores >= 2 -> cores
+                    c.solidity < 0.8 && ratio >= 2.5 -> ratio.roundToInt() // 목이 안 보이는 큰 무더기
+                    else -> 1
+                }.coerceIn(1, 60)
                 if (k == 1) pills += c.toPill(w, h)
                 else pills += splitComponent(c, k, labels, w, r0, g0, b0, h)
             }
@@ -186,6 +193,50 @@ object ClassicPillEngine {
             }
         }
         return best
+    }
+
+    /**
+     * 덩어리를 안쪽으로 깎아(거리 변환) 남는 중심부 개수를 센다.
+     * 깎는 두께 = 단축 반지름의 55%. 붙은 두 알 사이의 좁은 목은 끊어지고, 단독 알약은 하나로 남는다.
+     */
+    private fun countCores(c: Comp, labels: IntArray, w: Int): Int {
+        val bw = c.maxX - c.minX + 3
+        val bh = c.maxY - c.minY + 3
+        val inf = Int.MAX_VALUE / 4
+        val d = IntArray(bw * bh) { 0 }
+        for (y in 1 until bh - 1) for (x in 1 until bw - 1) {
+            if (labels[(c.minY + y - 1) * w + (c.minX + x - 1)] == c.id) d[y * bw + x] = inf
+        }
+        // 3-4 챔퍼 거리 변환 (값/3 ≈ 픽셀 거리)
+        for (y in 1 until bh - 1) for (x in 1 until bw - 1) {
+            val i = y * bw + x
+            if (d[i] == 0) continue
+            d[i] = minOf(d[i], d[i - 1] + 3, d[i - bw] + 3, minOf(d[i - bw - 1] + 4, d[i - bw + 1] + 4))
+        }
+        for (y in bh - 2 downTo 1) for (x in bw - 2 downTo 1) {
+            val i = y * bw + x
+            if (d[i] == 0) continue
+            d[i] = minOf(d[i], d[i + 1] + 3, d[i + bw] + 3, minOf(d[i + bw + 1] + 4, d[i + bw - 1] + 4))
+        }
+        // 단축 반지름 (2차 모멘트: 반지름 b 인 원의 분산 = b²/4)
+        val a = c.area.toDouble()
+        val mx = c.sx / a
+        val my = c.sy / a
+        val vx = c.sxx / a - mx * mx
+        val vy = c.syy / a - my * my
+        val cxy = c.sxy / a - mx * my
+        val tr = vx + vy
+        val l2 = max(0.0, tr / 2 - sqrt(max(0.0, tr * tr / 4 - (vx * vy - cxy * cxy))))
+        val minorR = 2 * sqrt(l2)
+        val th = max(2.0, 0.55 * minorR) * 3
+        val core = BooleanArray(bw * bh) { d[it] > th }
+        val lab = IntArray(bw * bh)
+        val k = labelComponents(core, bw, bh, true, lab)
+        if (k <= 1) return k.coerceAtLeast(1)
+        val size = IntArray(k + 1)
+        for (l in lab) if (l > 0) size[l]++
+        val largest = size.max()
+        return (1..k).count { size[it] >= max(4, largest / 8) }.coerceAtLeast(1)
     }
 
     /** 덩어리의 볼록도 = 픽셀 수 / 볼록껍질 면적. 단독 알약 ≈ 0.95 이상, 붙은 알약 ≈ 0.6~0.9 */
