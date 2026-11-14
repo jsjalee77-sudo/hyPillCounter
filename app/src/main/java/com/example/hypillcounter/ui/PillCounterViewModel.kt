@@ -43,7 +43,7 @@ sealed interface Screen {
     data class Detail(val record: CountRecord) : Screen
 }
 
-data class LiveResult(val pills: List<Pill>)
+data class LiveResult(val pills: List<Pill>, val warning: String? = null)
 
 private sealed interface Edit {
     data class Added(val marker: Marker) : Edit
@@ -109,8 +109,9 @@ class PillCounterViewModel(app: Application) : AndroidViewModel(app) {
     fun onLiveFrame(frame: Bitmap) {
         if (screen != Screen.Camera) return
         val crop = frame.cropNormalized(guideRect)
-        val pills = runCatching { detector.detect(crop, sensitivity, LIVE_MAX_SIDE) }.getOrDefault(emptyList())
-        mainHandler.post { if (liveEnabled && screen == Screen.Camera) liveResult = LiveResult(pills) }
+        val det = runCatching { detector.detectWithInfo(crop, sensitivity, LIVE_MAX_SIDE) }.getOrNull()
+        val res = LiveResult(det?.pills.orEmpty(), det?.warning)
+        mainHandler.post { if (liveEnabled && screen == Screen.Camera) liveResult = res }
     }
 
     fun toggleLive() {
@@ -170,16 +171,18 @@ class PillCounterViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.Default) {
                 val start = System.nanoTime()
-                val pills = runCatching { detector.detect(bitmap, sens, ANALYSIS_MAX_SIDE) }
+                val pills = runCatching { detector.detectWithInfo(bitmap, sens, ANALYSIS_MAX_SIDE) }
                 val ms = (System.nanoTime() - start) / 1_000_000
                 pills to ms
             }
             if (token != analysisToken) return@launch
             analyzing = false
-            val pills = result.first.getOrElse {
+            val det = result.first.getOrElse {
                 message = "분석 실패: ${it.message}"
-                emptyList()
+                null
             }
+            det?.warning?.let { message = it }
+            val pills = det?.pills.orEmpty()
             elapsedMs = result.second
             val aspect = bitmap.height.toFloat() / bitmap.width
             autoMarkers = pills.map {

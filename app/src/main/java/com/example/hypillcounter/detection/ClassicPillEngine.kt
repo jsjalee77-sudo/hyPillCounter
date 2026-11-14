@@ -7,20 +7,34 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
+/** 분석 결과. [warning] 이 있으면 사용자에게 촬영 환경 안내를 보여준다. */
+data class ClassicResult(val pills: List<Pill>, val warning: String? = null)
+
 /**
  * 학습 모델 없이 동작하는 고전 영상처리 기반 알약 계수 엔진 (순수 Kotlin, 단위 테스트 가능).
  *
- * 1. 3x3 블러 → 트레이 배경색 추정(테두리 가중 최빈색)
- * 2. 배경색과의 색 거리 맵 → Otsu 이진화(감도 반영)
+ * 1. 3x3 블러 → 트레이 배경색 추정(테두리 가중 최빈색) → 격자별 국소 배경(조명 불균일·그림자 보정)
+ * 2. 국소 배경과의 색 거리 → Otsu 이진화(감도 반영)
  * 3. 작은 구멍(빛 반사) 메우기 → 모폴로지 열림(얇은 접촉부 분리)
- * 4. 연결 요소 라벨링 → 색상별 그룹화
- * 5. 그룹별 "알약 1개 면적" 추정 → 붙어있는 덩어리는 면적비로 개수 산출 후 k-means 로 위치 분리
+ * 4. 연결 요소 → 알약이 아닌 것 제거 (화면 가장자리에 걸친 것, 가늘고 긴 선, 너무 크거나 불규칙한 덩어리)
+ * 5. 색상별 그룹 → 오목한(붙어 있는) 덩어리만 면적비로 개수 산출 후 k-means 분리.
+ *    볼록한 덩어리는 크기가 커도 1알로 본다 (크기가 다른 알약이 섞여도 과다 계수하지 않도록).
  */
 object ClassicPillEngine {
 
-    fun detect(px: IntArray, w: Int, h: Int, sensitivity: Float = 0.5f): List<Pill> {
+    /** 배경과 비슷한 픽셀 비율이 이보다 낮으면 단색 트레이 위가 아니라고 판단 */
+    private const val MIN_BG_COVERAGE = 0.30
+    /** 볼록도(면적/볼록껍질 면적)가 이보다 낮으면 여러 알이 붙은 덩어리로 본다 */
+    private const val SOLID_SINGLE = 0.92
+    /** 장축/단축 비가 이보다 크면 선(트레이 테두리, 그림자 경계 등)으로 보고 제외 */
+    private const val MAX_ELONGATION = 4.5
+
+    fun detect(px: IntArray, w: Int, h: Int, sensitivity: Float = 0.5f): List<Pill> =
+        analyze(px, w, h, sensitivity).pills
+
+    fun analyze(px: IntArray, w: Int, h: Int, sensitivity: Float = 0.5f): ClassicResult {
         val n = w * h
-        if (w < 8 || h < 8 || px.size < n) return emptyList()
+        if (w < 8 || h < 8 || px.size < n) return ClassicResult(emptyList())
         val s = sensitivity.coerceIn(0f, 1f)
 
         val r0 = IntArray(n)
@@ -37,19 +51,28 @@ object ClassicPillEngine {
         val b = boxBlur3(b0, w, h)
 
         val bg = estimateBackground(r, g, b, w, h)
+        val local = localBackground(r, g, b, w, h, bg)
         val dist = IntArray(n)
         val hist = IntArray(256)
+        var bgLike = 0
         for (i in 0 until n) {
-            val dr = r[i] - bg[0]
-            val dg = g[i] - bg[1]
-            val db = b[i] - bg[2]
+            val dr = r[i] - local[3 * i]
+            val dg = g[i] - local[3 * i + 1]
+            val db = b[i] - local[3 * i + 2]
             val d = min(255, sqrt((dr * dr + dg * dg + db * db).toDouble()).toInt())
             dist[i] = d
             hist[d]++
+            if (d < 30) bgLike++
         }
-        val otsu = otsuThreshold(hist, n)
+        if (bgLike < n * MIN_BG_COVERAGE) {
+            return ClassicResult(emptyList(), "배경이 고르지 않습니다. 단색 트레이를 가이드 박스에 꽉 채워 촬영해 주세요")
+        }
+        // 배경 잡음 기반 기준값 (Otsu 는 진한 알약에 끌려 연한 알약을 놓치므로 사용하지 않음)
+        var acc = 0
+        var median = 0
+        while (median < 255 && acc + hist[median] < n / 2) { acc += hist[median]; median++ }
         val minT = 14f + (1f - s) * 36f
-        val t = (max(otsu.toFloat(), minT) * (1.25f - 0.5f * s)).roundToInt().coerceIn(8, 220)
+        val t = (max(minT, median * 2.5f + 8f) * (1.25f - 0.5f * s)).roundToInt().coerceIn(8, 220)
 
         var mask = BooleanArray(n) { dist[it] >= t }
         fillSmallHoles(mask, w, h, maxHole = max(16, (n * 0.002).toInt()))
@@ -58,7 +81,7 @@ object ClassicPillEngine {
 
         val labels = IntArray(n)
         val count = labelComponents(mask, w, h, true, labels)
-        if (count == 0) return emptyList()
+        if (count == 0) return ClassicResult(emptyList())
         val comps = Array(count + 1) { Comp(it) }
         for (y in 0 until h) {
             val row = y * w
@@ -69,8 +92,14 @@ object ClassicPillEngine {
             }
         }
         val minArea = max(12, n / 25000)
-        val valid = (1..count).map { comps[it] }.filter { it.area >= minArea }
-        if (valid.isEmpty()) return emptyList()
+        val valid = (1..count).map { comps[it] }.filter { c ->
+            if (c.area < minArea || c.area > n / 4) return@filter false
+            // 가이드 박스 밖으로 이어지는 물체(트레이 테두리, 손, 배경)는 제외
+            if (c.minX == 0 || c.minY == 0 || c.maxX == w - 1 || c.maxY == h - 1) return@filter false
+            c.solidity = solidity(c, labels, w)
+            c.elongation() <= MAX_ELONGATION && c.solidity >= 0.45
+        }
+        if (valid.isEmpty()) return ClassicResult(emptyList())
 
         // 색상 기반 그룹화 (종류별로 1알 면적이 다를 수 있으므로)
         val groups = mutableListOf<MutableList<Comp>>()
@@ -102,17 +131,24 @@ object ClassicPillEngine {
             }
         }
 
+        // 전체 기준 1알 면적 (볼록한 덩어리의 중앙값). 그룹 추정이 파편 때문에 너무 작아지는 것을 막는다
+        val solidAreas = valid.filter { it.solidity >= SOLID_SINGLE }.map { it.area }.sorted()
+        val globalUnit = (solidAreas.ifEmpty { valid.map { it.area }.sorted() }).let { it[it.size / 2] }.toDouble()
+
         val pills = ArrayList<Pill>()
         for (grp in groups) {
-            val unit = estimateUnitArea(IntArray(grp.size) { grp[it].area })
+            // 1알 면적은 볼록한(단독일 가능성이 높은) 덩어리로 추정
+            val base = grp.filter { it.solidity >= SOLID_SINGLE && it.area >= globalUnit * 0.15 }.ifEmpty { grp }
+            val unit = max(estimateUnitArea(IntArray(base.size) { base[it].area }), globalUnit * 0.4)
             for (c in grp) {
-                if (grp.size > 1 && c.area < unit * 0.35) continue // 파편/노이즈
-                val k = max(1, (c.area / unit).roundToInt()).coerceAtMost(60)
+                if (c.area < globalUnit * 0.12) continue // 파편/그림자 조각/노이즈
+                val ratio = c.area / unit
+                val k = if (c.solidity < SOLID_SINGLE && ratio >= 1.5) max(2, ratio.roundToInt()).coerceAtMost(60) else 1
                 if (k == 1) pills += c.toPill(w, h)
                 else pills += splitComponent(c, k, labels, w, r0, g0, b0, h)
             }
         }
-        return pills
+        return ClassicResult(pills)
     }
 
     /** 덩어리 면적 목록에서 "알약 1개" 면적을 추정한다. */
@@ -150,6 +186,138 @@ object ClassicPillEngine {
             }
         }
         return best
+    }
+
+    /** 덩어리의 볼록도 = 픽셀 수 / 볼록껍질 면적. 단독 알약 ≈ 0.95 이상, 붙은 알약 ≈ 0.6~0.9 */
+    private fun solidity(c: Comp, labels: IntArray, w: Int): Double {
+        val pts = ArrayList<Long>()
+        for (y in c.minY..c.maxY) {
+            val row = y * w
+            var lo = -1
+            var hi = -1
+            for (x in c.minX..c.maxX) if (labels[row + x] == c.id) {
+                if (lo < 0) lo = x
+                hi = x
+            }
+            if (lo < 0) continue
+            // 픽셀 모서리 좌표로 껍질을 만든다
+            pts += pack(lo, y); pts += pack(lo, y + 1); pts += pack(hi + 1, y); pts += pack(hi + 1, y + 1)
+        }
+        val hull = convexHull(pts)
+        if (hull.size < 3) return 1.0
+        var a2 = 0L
+        for (i in hull.indices) {
+            val p = hull[i]
+            val q = hull[(i + 1) % hull.size]
+            a2 += ux(p).toLong() * uy(q) - ux(q).toLong() * uy(p)
+        }
+        val hullArea = abs(a2) / 2.0
+        return if (hullArea <= 0) 1.0 else (c.area / hullArea).coerceAtMost(1.0)
+    }
+
+    private fun pack(x: Int, y: Int): Long = (x.toLong() shl 32) or (y.toLong() and 0xFFFFFFFFL)
+    private fun ux(p: Long): Int = (p shr 32).toInt()
+    private fun uy(p: Long): Int = p.toInt()
+
+    private fun convexHull(points: List<Long>): List<Long> {
+        val p = points.distinct().sortedWith(compareBy({ ux(it) }, { uy(it) }))
+        if (p.size < 3) return p
+        fun cross(o: Long, a: Long, b: Long): Long =
+            (ux(a) - ux(o)).toLong() * (uy(b) - uy(o)) - (uy(a) - uy(o)).toLong() * (ux(b) - ux(o))
+        val hull = ArrayList<Long>()
+        for (pt in p) {
+            while (hull.size >= 2 && cross(hull[hull.size - 2], hull[hull.size - 1], pt) <= 0) hull.removeAt(hull.size - 1)
+            hull += pt
+        }
+        val lower = hull.size + 1
+        for (i in p.size - 2 downTo 0) {
+            val pt = p[i]
+            while (hull.size >= lower && cross(hull[hull.size - 2], hull[hull.size - 1], pt) <= 0) hull.removeAt(hull.size - 1)
+            hull += pt
+        }
+        hull.removeAt(hull.size - 1)
+        return hull
+    }
+
+    /**
+     * 격자(약 8x8)별 배경색을 구해 픽셀마다 보간한다. 조명 그라데이션·그림자·비네팅을 보정해
+     * 어두운 구석이 알약으로 잡히는 것을 막는다. 결과는 픽셀마다 [r,g,b] 가 이어진 배열.
+     */
+    private fun localBackground(r: IntArray, g: IntArray, b: IntArray, w: Int, h: Int, bg: IntArray): IntArray {
+        val cell = max(8, max(w, h) / 8)
+        val gx = (w + cell - 1) / cell
+        val gy = (h + cell - 1) / cell
+        var est = Array(gx * gy) { bg.copyOf() }
+        val dirs = arrayOf(intArrayOf(-1, 0), intArrayOf(1, 0), intArrayOf(0, -1), intArrayOf(0, 1))
+        for (pass in 0 until 3) {
+            val tol = if (pass == 0) 48 else 36
+            val ok = BooleanArray(gx * gy)
+            val next = Array(gx * gy) { est[it].copyOf() }
+            for (cy in 0 until gy) for (cx in 0 until gx) {
+                val ci = cy * gx + cx
+                val ref = est[ci]
+                var sr = 0L; var sg = 0L; var sb = 0L; var cnt = 0; var total = 0
+                for (y in cy * cell until min(h, (cy + 1) * cell)) {
+                    val row = y * w
+                    for (x in cx * cell until min(w, (cx + 1) * cell)) {
+                        val i = row + x
+                        total++
+                        val dr = r[i] - ref[0]; val dg = g[i] - ref[1]; val db = b[i] - ref[2]
+                        if (dr * dr + dg * dg + db * db <= tol * tol) {
+                            sr += r[i]; sg += g[i]; sb += b[i]; cnt++
+                        }
+                    }
+                }
+                if (cnt > 0 && cnt >= total * 0.2) {
+                    next[ci] = intArrayOf((sr / cnt).toInt(), (sg / cnt).toInt(), (sb / cnt).toInt())
+                    ok[ci] = true
+                }
+            }
+            // 배경을 찾지 못한 칸(알약으로 덮인 칸 등)은 이웃 칸 값으로 채운다
+            if (ok.any { it }) {
+                var filled = ok
+                while (!filled.all { it }) {
+                    val nf = filled.copyOf()
+                    for (cy in 0 until gy) for (cx in 0 until gx) {
+                        val ci = cy * gx + cx
+                        if (filled[ci]) continue
+                        var sr = 0; var sg = 0; var sb = 0; var k = 0
+                        for (d in dirs) {
+                            val nx = cx + d[0]; val ny = cy + d[1]
+                            if (nx !in 0 until gx || ny !in 0 until gy) continue
+                            val ni = ny * gx + nx
+                            if (!filled[ni]) continue
+                            sr += next[ni][0]; sg += next[ni][1]; sb += next[ni][2]; k++
+                        }
+                        if (k > 0) {
+                            next[ci] = intArrayOf(sr / k, sg / k, sb / k)
+                            nf[ci] = true
+                        }
+                    }
+                    filled = nf
+                }
+            }
+            est = next
+        }
+        // 칸 중심 사이를 쌍선형 보간
+        val out = IntArray(w * h * 3)
+        for (y in 0 until h) {
+            val fy = ((y + 0.5f) / cell - 0.5f).coerceIn(0f, (gy - 1).toFloat())
+            val y0 = fy.toInt(); val y1 = min(gy - 1, y0 + 1); val ty = fy - y0
+            for (x in 0 until w) {
+                val fx = ((x + 0.5f) / cell - 0.5f).coerceIn(0f, (gx - 1).toFloat())
+                val x0 = fx.toInt(); val x1 = min(gx - 1, x0 + 1); val tx = fx - x0
+                val a = est[y0 * gx + x0]; val bb = est[y0 * gx + x1]
+                val c = est[y1 * gx + x0]; val d = est[y1 * gx + x1]
+                val o = 3 * (y * w + x)
+                for (k in 0..2) {
+                    val top = a[k] + (bb[k] - a[k]) * tx
+                    val bot = c[k] + (d[k] - c[k]) * tx
+                    out[o + k] = (top + (bot - top) * ty).roundToInt()
+                }
+            }
+        }
+        return out
     }
 
     private fun splitComponent(
@@ -241,6 +409,7 @@ object ClassicPillEngine {
         var sr = 0L; var sg = 0L; var sb = 0L
         var minX = Int.MAX_VALUE; var minY = Int.MAX_VALUE
         var maxX = -1; var maxY = -1
+        var solidity = 1.0
 
         fun add(x: Int, y: Int, r: Int, g: Int, b: Int) {
             area++
@@ -257,7 +426,8 @@ object ClassicPillEngine {
         val meanG get() = (sg / area).toInt()
         val meanB get() = (sb / area).toInt()
 
-        fun toPill(w: Int, h: Int): Pill {
+        /** 2차 모멘트로 구한 장축/단축 비 (1 = 원형) */
+        fun elongation(): Double {
             val a = area.toDouble()
             val mx = sx / a
             val my = sy / a
@@ -265,18 +435,21 @@ object ClassicPillEngine {
             val vy = syy / a - my * my + 1.0 / 12
             val cxy = sxy / a - mx * my
             val tr = vx + vy
-            val det = vx * vy - cxy * cxy
-            val disc = sqrt(max(0.0, tr * tr / 4 - det))
-            val l1 = tr / 2 + disc
-            val l2 = max(1e-6, tr / 2 - disc)
-            val elong = sqrt(max(1.0, l1 / l2)).toFloat()
+            val disc = sqrt(max(0.0, tr * tr / 4 - (vx * vy - cxy * cxy)))
+            return sqrt(max(1.0, (tr / 2 + disc) / max(1e-6, tr / 2 - disc)))
+        }
+
+        fun toPill(w: Int, h: Int): Pill {
+            val a = area.toDouble()
+            val mx = sx / a
+            val my = sy / a
             val color = (0xFF shl 24) or (meanR shl 16) or (meanG shl 8) or meanB
             return Pill(
                 x = ((mx + 0.5) / w).toFloat(),
                 y = ((my + 0.5) / h).toFloat(),
                 radius = (sqrt(a / PI) / w).toFloat(),
                 color = color,
-                elongation = elong,
+                elongation = elongation().toFloat(),
                 boxW = (maxX - minX + 1).toFloat() / w,
                 boxH = (maxY - minY + 1).toFloat() / h,
             )

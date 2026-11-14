@@ -24,8 +24,15 @@ data class Pill(
     val boxH: Float = 0f,
 )
 
+/** 탐지 결과 + 촬영 환경 경고(있을 때만) */
+data class Detection(val pills: List<Pill>, val warning: String? = null)
+
 interface PillDetector {
     val name: String
+
+    /** 경고 메시지를 함께 돌려준다. 기본은 경고 없음. */
+    fun detectWithInfo(bitmap: Bitmap, sensitivity: Float, maxSide: Int): Detection =
+        Detection(detect(bitmap, sensitivity, maxSide))
 
     /**
      * @param sensitivity 0..1 (높을수록 더 많이 잡음)

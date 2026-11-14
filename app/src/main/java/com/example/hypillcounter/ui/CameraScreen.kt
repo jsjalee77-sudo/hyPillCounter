@@ -200,9 +200,10 @@ fun CameraScreen(vm: PillCounterViewModel) {
                 .padding(bottom = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            val warning = live?.warning
             Text(
-                "트레이를 가이드 박스 안에 맞추고 알약이 겹치지 않게 펼쳐주세요",
-                color = Color.White,
+                warning ?: "트레이를 가이드 박스 안에 맞추고 알약이 겹치지 않게 펼쳐주세요",
+                color = if (warning != null) Color(0xFFFFB74D) else Color.White,
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(horizontal = 24.dp),

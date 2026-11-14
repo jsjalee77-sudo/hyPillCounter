@@ -85,6 +85,56 @@ class ClassicPillEngineTest {
     }
 
     @Test
+    fun mixedSizesAreNotOverCounted() {
+        // 같은 흰색이지만 크기가 3배 다른 알약: 큰 알약을 여러 개로 쪼개면 안 됨
+        val c = Canvas(520, 380, rgb(30, 60, 120))
+        for (i in 0 until 10) c.circle(40 + (i % 5) * 100, 50 + (i / 5) * 60, 8, rgb(245, 245, 240))
+        for (i in 0 until 6) c.circle(60 + (i % 3) * 160, 230 + (i / 3) * 90, 26, rgb(245, 245, 240))
+        c.noise(Random(5), 5)
+        assertEquals(16, ClassicPillEngine.detect(c.px, c.w, c.h).size)
+    }
+
+    @Test
+    fun handlesUnevenLighting() {
+        // 왼쪽 위는 밝고 오른쪽 아래는 어두운 트레이 (조명 그라데이션)
+        val c = Canvas(480, 360, 0)
+        for (y in 0 until c.h) for (x in 0 until c.w) {
+            val v = (200 - (x + y) * 110 / (c.w + c.h))
+            c.px[y * c.w + x] = rgb(v, v, v + 10)
+        }
+        for (i in 0 until 12) c.circle(50 + (i % 6) * 75, 70 + (i / 6) * 160, 15, rgb(240, 200, 30))
+        c.noise(Random(6), 5)
+        assertEquals(12, ClassicPillEngine.detect(c.px, c.w, c.h).size)
+    }
+
+    @Test
+    fun ignoresObjectsAtEdgesAndLines() {
+        val c = Canvas(480, 360, rgb(30, 32, 40))
+        for (i in 0 until 8) c.circle(80 + (i % 4) * 100, 110 + (i / 4) * 120, 16, rgb(240, 240, 235))
+        // 가장자리에 걸친 트레이 테두리/손가락
+        for (y in 0 until 360) for (x in 0 until 25) c.px[y * c.w + x] = rgb(200, 160, 140)
+        c.circle(470, 180, 40, rgb(200, 160, 140))
+        // 가늘고 긴 선 (그림자 경계, 케이블)
+        for (x in 60 until 420) for (y in 300 until 305) c.px[y * c.w + x] = rgb(220, 220, 220)
+        c.noise(Random(7), 5)
+        assertEquals(8, ClassicPillEngine.detect(c.px, c.w, c.h).size)
+    }
+
+    @Test
+    fun clutteredSceneIsRejectedWithWarning() {
+        // 단색 트레이가 아닌 어지러운 장면 (책상, 방 등)
+        val rnd = Random(8)
+        val c = Canvas(320, 240, 0)
+        for (by in 0 until 240 step 20) for (bx in 0 until 320 step 20) {
+            val col = rgb(rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(256))
+            for (y in by until by + 20) for (x in bx until bx + 20) c.px[y * c.w + x] = col
+        }
+        val res = ClassicPillEngine.analyze(c.px, c.w, c.h)
+        assertEquals(0, res.pills.size)
+        assert(res.warning != null)
+    }
+
+    @Test
     fun unitAreaEstimateHandlesClumps() {
         val areas = intArrayOf(800, 820, 790, 810, 1600, 1620, 2400, 805, 795)
         val u = ClassicPillEngine.estimateUnitArea(areas)
