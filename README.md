@@ -33,3 +33,15 @@
 ./gradlew :app:assembleDebug
 ./gradlew :app:testDebugUnitTest   # 탐지 엔진 합성 이미지 테스트
 ```
+
+## 배포용(release) APK 만들기
+1. 프로젝트 루트에 `keystore.properties` 작성 (Git 에 올리지 않음)
+   ```
+   storeFile=C:/Users/admin/keystores/jeongpill-release.jks
+   storePassword=...
+   keyAlias=jeongpill
+   keyPassword=...
+   ```
+2. `gradlew assembleRelease` → `app/build/outputs/apk/release/app-release.apk`
+   - 실제 폰(arm64) 전용, 코드 최적화(R8) 적용, 약 40MB
+- **서명 키(.jks)와 비밀번호는 반드시 별도 백업하세요.** 잃어버리면 같은 앱으로 업데이트할 수 없습니다.

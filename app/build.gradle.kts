@@ -1,6 +1,14 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+// 릴리스 서명 정보: 프로젝트 루트의 keystore.properties (Git 에 올리지 않음)
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -13,22 +21,34 @@ android {
         applicationId = "com.example.hypillcounter"
         minSdk = 24
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
 
-        ndk {
-            // 최신 스마트폰(arm64) + 에뮬레이터(x86_64)만 포함해 AI 런타임 용량 절감
-            abiFilters += listOf("arm64-v8a", "x86_64")
+    signingConfigs {
+        if (keystoreProps.getProperty("storeFile") != null) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
         }
     }
 
     buildTypes {
+        debug {
+            // 실제 폰(arm64) + 에뮬레이터(x86_64)
+            ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        }
         release {
+            // 배포용은 실제 폰(arm64)만 포함해 용량 절감
+            ndk { abiFilters += listOf("arm64-v8a") }
+            signingConfig = signingConfigs.findByName("release")
             optimization {
                 enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
             }
         }
     }
