@@ -12,17 +12,17 @@ val keystoreProps = Properties().apply {
 }
 
 android {
-    namespace = "com.example.hypillcounter"
+    namespace = "com.jeongpharm.pillcounter"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "com.example.hypillcounter"
+        applicationId = "com.jeongpharm.pillcounter"
         minSdk = 24
         targetSdk = 37
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 5
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
