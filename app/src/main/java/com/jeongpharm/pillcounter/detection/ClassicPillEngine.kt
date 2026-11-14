@@ -99,12 +99,20 @@ object ClassicPillEngine {
             c.solidity = solidity(c, labels, w)
             c.elongation() <= MAX_ELONGATION && c.solidity >= 0.45
         }
-        if (valid.isEmpty()) return ClassicResult(emptyList())
+        // 화면 대비 너무 작은 것은 바탕 무늬(대리석 점, 먼지)로 본다. 알약은 화면의 0.03% 이상
+        val minPill = max(minArea, (n * 0.0003).toInt())
+        val sized = valid.filter { it.area >= minPill }
+        // 그림자 제거: 배경과 색조가 같고 더 어두우며, 다른 덩어리 바로 옆에 붙어 있는 것
+        val shadowLike = sized.filter { isShadowLike(it, local, w) }.toSet()
+        val kept = sized.filter { c ->
+            c !in shadowLike || sized.none { o -> o !== c && o !in shadowLike && near(c, o, 4) }
+        }
+        if (kept.isEmpty()) return ClassicResult(emptyList())
 
         // 색상 기반 그룹화 (종류별로 1알 면적이 다를 수 있으므로)
         val groups = mutableListOf<MutableList<Comp>>()
         val means = mutableListOf<FloatArray>()
-        for (c in valid.sortedByDescending { it.area }) {
+        for (c in kept.sortedByDescending { it.area }) {
             val cr = c.meanR.toFloat()
             val cg = c.meanG.toFloat()
             val cb = c.meanB.toFloat()
@@ -132,8 +140,8 @@ object ClassicPillEngine {
         }
 
         // 전체 기준 1알 면적 (볼록한 덩어리의 중앙값). 그룹 추정이 파편 때문에 너무 작아지는 것을 막는다
-        val solidAreas = valid.filter { it.solidity >= SOLID_SINGLE }.map { it.area }.sorted()
-        val globalUnit = (solidAreas.ifEmpty { valid.map { it.area }.sorted() }).let { it[it.size / 2] }.toDouble()
+        val solidAreas = kept.filter { it.solidity >= SOLID_SINGLE }.map { it.area }.sorted()
+        val globalUnit = (solidAreas.ifEmpty { kept.map { it.area }.sorted() }).let { it[it.size / 2] }.toDouble()
 
         val pills = ArrayList<Pill>()
         for (grp in groups) {
@@ -141,7 +149,7 @@ object ClassicPillEngine {
             val base = grp.filter { it.solidity >= SOLID_SINGLE && it.area >= globalUnit * 0.15 }.ifEmpty { grp }
             val unit = max(estimateUnitArea(IntArray(base.size) { base[it].area }), globalUnit * 0.4)
             for (c in grp) {
-                if (c.area < globalUnit * 0.12) continue // 파편/그림자 조각/노이즈
+                if (c.area < globalUnit * 0.04) continue // 큰 알약 옆의 작은 파편
                 val ratio = c.area / unit
                 // 잘록한 목으로 나뉘는 중심부 개수 = 붙어 있는 알약 수.
                 // 그림자·반사로 모양이 약간 오목한 것만으로는 나누지 않는다.
@@ -157,6 +165,30 @@ object ClassicPillEngine {
         }
         return ClassicResult(pills)
     }
+
+    /**
+     * 그림자처럼 보이는가: 그 자리 배경보다 15~60% 어둡고 색조(정규화 RGB)는 배경과 거의 같다.
+     * 검은·진한 알약은 훨씬 어둡거나 색조가 달라서 해당하지 않는다.
+     */
+    private fun isShadowLike(c: Comp, local: IntArray, w: Int): Boolean {
+        val cx = (c.sx / c.area).toInt()
+        val cy = (c.sy / c.area).toInt()
+        val o = 3 * (cy * w + cx)
+        val br = local[o].toDouble(); val bgG = local[o + 1].toDouble(); val bb = local[o + 2].toDouble()
+        val lb = br + bgG + bb
+        val lc = (c.meanR + c.meanG + c.meanB).toDouble()
+        if (lb <= 0 || lc <= 0) return false
+        val ratio = lc / lb
+        if (ratio !in 0.40..0.85) return false
+        val dr = c.meanR / lc - br / lb
+        val dg = c.meanG / lc - bgG / lb
+        val db = c.meanB / lc - bb / lb
+        return sqrt(dr * dr + dg * dg + db * db) < 0.04
+    }
+
+    /** 두 덩어리의 경계 상자가 gap 픽셀 이내로 붙어 있는가 */
+    private fun near(a: Comp, b: Comp, gap: Int): Boolean =
+        a.minX <= b.maxX + gap && b.minX <= a.maxX + gap && a.minY <= b.maxY + gap && b.minY <= a.maxY + gap
 
     /** 덩어리 면적 목록에서 "알약 1개" 면적을 추정한다. */
     internal fun estimateUnitArea(areas: IntArray): Double {
